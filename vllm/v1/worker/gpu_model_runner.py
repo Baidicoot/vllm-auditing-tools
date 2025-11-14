@@ -441,6 +441,7 @@ class GPUModelRunner(
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
         self.positions = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
+        self.fuzz_strength = self._make_buffer(self.max_num_tokens, dtype=torch.float32)
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -577,6 +578,16 @@ class GPUModelRunner(
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
+
+        # Add fuzz_strength persistent buffer slice (for CUDA graphs)
+        fuzz_per_token = self.fuzz_strength.gpu[:num_tokens]
+        print(f"\n[DEBUG _init_model_kwargs] Called with num_tokens={num_tokens}")
+        print(f"[DEBUG _init_model_kwargs] Passing fuzz_strength slice:")
+        print(f"  shape={fuzz_per_token.shape}, dtype={fuzz_per_token.dtype}, device={fuzz_per_token.device}")
+        print(f"  min={fuzz_per_token.min().item():.4f}, max={fuzz_per_token.max().item():.4f}")
+        print(f"  unique values: {torch.unique(fuzz_per_token).cpu().numpy()}")
+        print(f"  first 10: {fuzz_per_token[:10].cpu().numpy()}")
+        model_kwargs['fuzz_strength_per_token'] = fuzz_per_token
 
         if not self.is_pooling_model:
             return model_kwargs
@@ -978,6 +989,7 @@ class GPUModelRunner(
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.fuzz_strength.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
@@ -1006,6 +1018,7 @@ class GPUModelRunner(
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.fuzz_strength.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
                 self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
@@ -1087,6 +1100,25 @@ class GPUModelRunner(
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+
+        # Fill fuzz_strength persistent buffer (for CUDA graphs)
+        print(f"\n{'='*80}")
+        print(f"[DEBUG ModelRunner _prepare_inputs] Batch info:")
+        print(f"  num_reqs={num_reqs}, num_scheduled_tokens={num_scheduled_tokens}")
+        print(f"  total_num_scheduled_tokens={total_num_scheduled_tokens}")
+        print(f"[DEBUG ModelRunner _prepare_inputs] Per-request fuzz_strength:")
+        print(f"  fuzz_strength_cpu (shape={self.input_batch.fuzz_strength_cpu[:num_reqs].shape}): {self.input_batch.fuzz_strength_cpu[:num_reqs]}")
+        print(f"[DEBUG ModelRunner _prepare_inputs] Request indices:")
+        print(f"  req_indices (first 20 of {len(req_indices)}): {req_indices[:min(20, len(req_indices))]}")
+
+        # Expand per-request fuzz_strength to per-token, writing into persistent buffer
+        fuzz_strength_np = self.fuzz_strength.np[:total_num_scheduled_tokens]
+        fuzz_strength_np[:] = self.input_batch.fuzz_strength_cpu[req_indices]
+        print(f"[DEBUG ModelRunner _prepare_inputs] Filled persistent buffer (numpy view):")
+        print(f"  shape={fuzz_strength_np.shape}")
+        print(f"  first 20 values: {fuzz_strength_np[:min(20, len(fuzz_strength_np))]}")
+        print(f"  unique values: {np.unique(fuzz_strength_np)}")
+        print(f"{'='*80}\n")
 
         # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]

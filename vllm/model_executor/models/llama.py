@@ -433,12 +433,23 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        fuzz_strength_per_token: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
+                # Apply conditional zeroing based on fuzz_strength
+                # Cast to correct dtype to match hidden_states
+                fuzz_strength = fuzz_strength_per_token.to(dtype=hidden_states.dtype)
+                # Use mathematical operations instead of boolean masks to avoid constant folding
+                # multiplier = 1.0 where fuzz_strength == 0, 0.0 where fuzz_strength > 0
+                # If fuzz > 0, clamp gives us something > 0, then we want multiplier = 0
+                # If fuzz == 0, clamp gives us 0, then we want multiplier = 1
+                # So: multiplier = 1 - min(fuzz_strength, 1)
+                multiplier = 1.0 - torch.clamp(fuzz_strength, 0.0, 1.0)
+                hidden_states = hidden_states * multiplier.unsqueeze(-1)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -649,9 +660,14 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        fuzz_strength_per_token: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         model_output = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            fuzz_strength_per_token=fuzz_strength_per_token,
         )
         return model_output
 

@@ -199,6 +199,15 @@ class InputBatch:
         self.repetition_penalties_cpu = self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
+        # Fuzz strength for embedding noise injection
+        self.fuzz_strength = torch.empty(
+            (max_num_reqs,), dtype=torch.float32, device=device
+        )
+        self.fuzz_strength_cpu_tensor = torch.empty(
+            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
+        )
+        self.fuzz_strength_cpu = self.fuzz_strength_cpu_tensor.numpy()
+
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
             (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
@@ -370,6 +379,14 @@ class InputBatch:
             )
             if sampling_params.repetition_penalty != 1.0:
                 self.repetition_penalties_reqs.add(req_id)
+
+            # Extract fuzz_strength from extra_args
+            fuzz_strength = 0.0
+            if sampling_params.extra_args:
+                print(f"[DEBUG InputBatch] extra_args = {sampling_params.extra_args}")
+                fuzz_strength = sampling_params.extra_args.get("fuzz_strength", 0.0)
+            self.fuzz_strength_cpu[req_index] = fuzz_strength
+            print(f"[DEBUG InputBatch] req_index={req_index}, req_id={req_id}, fuzz_strength={fuzz_strength}")
 
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
